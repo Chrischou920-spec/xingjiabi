@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+config.json
+.env
+logs/
+browser_data/
+node_modules/
+dist/
+build/
+.DS_Store
+

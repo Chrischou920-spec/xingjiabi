@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zhonghua-trip-core"
+version = "0.1.0"
+description = "面向大学生周末与节假日的国内往返行程规划内核"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+api = ["fastapi>=0.115", "uvicorn>=0.30"]
+
+[project.scripts]
+student-trip = "student_trip.cli:main"
+student-trip-server = "student_trip.server:main"
+
+[tool.setuptools.packages.find]
+include = ["student_trip*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
