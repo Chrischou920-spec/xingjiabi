@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import sys
+import threading
+import uuid
+from contextlib import nullcontext
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from .domestic import validate_mainland_city
-from .mcp_client import McpCallError, McpClientError, McpProcessClient
+from .mcp_client import McpClientError, McpProcessClient, McpStartupError
+from .query_control import check_cancelled, current_query
 from .models import TransportMode, TransportSegment
 from .providers import TicketProvider
 from .train_provider import ProviderResponseError, ProviderUnavailableError, ToolCaller
@@ -21,6 +26,7 @@ class DomesticFlightMcpProvider(TicketProvider):
     def __init__(self, client: ToolCaller, retries: int = 1):
         self.client = client
         self.retries = retries
+        self._query_lock = threading.Lock()
 
     @classmethod
     def from_bundled_service(
@@ -59,6 +65,7 @@ class DomesticFlightMcpProvider(TicketProvider):
             cwd=service_dir,
             env=env,
             startup_timeout=45,
+            serialize_calls=True,
         )
         return cls(client)
 
@@ -106,6 +113,10 @@ class DomesticFlightMcpProvider(TicketProvider):
             response = self._search_date(origin, destination, travel_date)
             for flight in response:
                 segment = self._normalize_flight(flight, origin, destination, travel_date)
+                if not isinstance(flight, dict):
+                    raise ProviderResponseError("航班数据项不是对象")
+                if segment is None and str(flight.get("航班类型") or "直达") == "直达" and "/" not in str(flight.get("航班号") or ""):
+                    raise ProviderResponseError("航班数据缺少有效航班号、时间或价格，不能判断为无票")
                 if segment and earliest <= segment.departure_at <= latest:
                     segments.append(segment)
 
@@ -116,15 +127,33 @@ class DomesticFlightMcpProvider(TicketProvider):
         return sorted(unique.values(), key=lambda item: (item.departure_at, item.price))
 
     def _search_date(self, origin: str, destination: str, travel_date: date):
-        text = self._call(
-            "searchFlightRoutes",
-            {
+        while not self._query_lock.acquire(timeout=0.1):
+            check_cancelled()
+        try:
+            check_cancelled()
+            query_id = uuid.uuid4().hex
+            arguments = {
                 "departure_city": origin,
                 "destination_city": destination,
                 "departure_date": travel_date.isoformat(),
-            },
-            timeout=150,
-        )
+                "query_id": query_id,
+            }
+            control = current_query.get()
+            interrupt = getattr(self.client, "interrupt_tool", None)
+            def cancel():
+                if interrupt:
+                    interrupt("cancelFlightSearch", {"query_id": query_id})
+            with control.on_cancel(cancel) if control else nullcontext():
+                try:
+                    # Service's 240s total budget includes its 120s human verification
+                    # window. Leave room for IPC and browser cleanup.
+                    text = self._call("searchFlightRoutes", arguments, timeout=300)
+                except ProviderUnavailableError:
+                    cancel()
+                    raise
+                check_cancelled()
+        finally:
+            self._query_lock.release()
         data = self._json(text)
         if not isinstance(data, dict):
             raise ProviderResponseError("航班响应不是对象")
@@ -144,8 +173,13 @@ class DomesticFlightMcpProvider(TicketProvider):
         for _ in range(self.retries + 1):
             try:
                 return self.client.call_tool_text(name, arguments, timeout=timeout)
-            except (McpClientError, McpCallError) as exc:
+            except McpStartupError as exc:
+                # Only startup failures are safe to retry. A timeout/protocol error
+                # may still have a browser job running in the MCP service.
                 last_error = exc
+            except McpClientError as exc:
+                last_error = exc
+                break
         detail = str(last_error or "未知错误")
         if "验证码" in detail or "verification" in detail.lower():
             detail = f"需要在浏览器中完成验证码：{detail}"
@@ -189,7 +223,7 @@ class DomesticFlightMcpProvider(TicketProvider):
             price = float(amount)
         except (TypeError, ValueError):
             return None
-        if price <= 0:
+        if not math.isfinite(price) or price <= 0:
             return None
 
         departure_station = cls._station(flight, "出发机场", "出发航站楼", origin)

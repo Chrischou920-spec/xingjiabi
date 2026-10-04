@@ -17,6 +17,78 @@ import random
 import logging
 import time
 import re
+import socket
+import threading
+from contextlib import contextmanager
+from html import unescape
+
+
+class FlightSearchError(RuntimeError):
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+
+
+_SEARCH_LOCK = threading.Lock()
+_REGISTRY_LOCK = threading.Lock()
+_ACTIVE_QUERIES = {}
+_CANCELLED_QUERIES = {}
+SEARCH_TIMEOUT_SECONDS = 240
+CAPTCHA_TIMEOUT_SECONDS = 120
+
+
+def cancelFlightSearch(query_id: str) -> Dict[str, Any]:
+    """Signal only the requested job; cancellation never acquires the search lock."""
+    if not query_id or len(query_id) > 128:
+        return {"status": "error", "error_code": "INVALID_QUERY_ID"}
+    with _REGISTRY_LOCK:
+        now = time.monotonic()
+        expired = [key for key, stamp in _CANCELLED_QUERIES.items() if now - stamp > 600]
+        for key in expired:
+            _CANCELLED_QUERIES.pop(key, None)
+        event = _ACTIVE_QUERIES.get(query_id)
+        if event:
+            event.set()
+        else:
+            # Handles cancel arriving before a queued tools/call starts.
+            if len(_CANCELLED_QUERIES) >= 1024:
+                _CANCELLED_QUERIES.pop(next(iter(_CANCELLED_QUERIES)))
+            _CANCELLED_QUERIES[query_id] = now
+    return {"status": "success", "query_id": query_id}
+
+
+@contextmanager
+def _browser_session(cancel_event):
+    """Serialize both threads and local processes sharing the persistent cookies."""
+    acquired = False
+    lock_file = None
+    deadline = time.monotonic() + 30
+    try:
+        while not acquired:
+            if cancel_event.is_set():
+                raise FlightSearchError("QUERY_CANCELLED", "航班查询已取消")
+            if time.monotonic() >= deadline:
+                raise FlightSearchError("SEARCH_BUSY", "另一条航班查询仍在运行，请稍后重试")
+            acquired = _SEARCH_LOCK.acquire(timeout=0.1)
+        # macOS/Linux: protect the profile even when two MCP processes were started.
+        if os.name == "posix":
+            import fcntl
+            lock_file = open(os.path.join(BROWSER_USER_DATA_DIR, "flight-query.lock"), "a")
+            while True:
+                try:
+                    fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if cancel_event.wait(0.1):
+                        raise FlightSearchError("QUERY_CANCELLED", "航班查询已取消")
+                    if time.monotonic() >= deadline:
+                        raise FlightSearchError("SEARCH_BUSY", "另一航班服务正在使用浏览器，请稍后重试")
+        yield
+    finally:
+        if lock_file:
+            lock_file.close()
+        if acquired:
+            _SEARCH_LOCK.release()
 
 # 初始化日志器
 logger = logging.getLogger(__name__)
@@ -197,6 +269,14 @@ def create_browser_options(headless: bool = True, use_user_data: bool = True) ->
         配置好的 ChromiumOptions 对象
     """
     co = ChromiumOptions()
+    # Do not attach to the user's browser (or another MCP's default port 9222).
+    # auto_port() also replaces the user profile, so explicitly assign a fresh
+    # port while retaining cookies; _browser_session protects that profile.
+    with socket.socket() as port_socket:
+        port_socket.bind(('127.0.0.1', 0))
+        co.set_local_port(port_socket.getsockname()[1])
+    co.set_timeouts(base=5, page_load=30, script=5)
+    co.set_retry(times=0)
 
     # 【关键】设置浏览器路径 - 支持 Chrome/Edge/Chromium
     if DETECTED_BROWSER_PATH:
@@ -207,7 +287,7 @@ def create_browser_options(headless: bool = True, use_user_data: bool = True) ->
 
     # 使用持久化用户数据目录（关键：保存 Cookie 和会话，绕过验证码）
     if use_user_data:
-        co.set_argument(f'--user-data-dir={BROWSER_USER_DATA_DIR}')
+        co.set_user_data_path(BROWSER_USER_DATA_DIR)
         logger.debug(f"使用用户数据目录: {BROWSER_USER_DATA_DIR}")
 
     # 随机选择 User-Agent
@@ -279,7 +359,7 @@ class FlightRouteSearcher:
     - 查询完成后立即关闭浏览器，避免同一浏览器发送多个请求
     """
 
-    def __init__(self, headless=True):
+    def __init__(self, headless=True, cancel_event=None):
         """
         初始化查询器（不再预创建浏览器）
 
@@ -292,8 +372,54 @@ class FlightRouteSearcher:
         self.headless = headless
         self.base_url = "https://flights.ctrip.com/online/list/oneway-{}-{}?_=1&depdate={}&cabin=Y_S_C_F"
         self.page = None  # 延迟创建
+        self.cancel_event = cancel_event or threading.Event()
+        self.deadline = time.monotonic() + SEARCH_TIMEOUT_SECONDS
 
         logger.info("航班路线查询器初始化完成（每次请求将创建新浏览器实例）")
+
+    def _check_interrupt(self):
+        if self.cancel_event.is_set():
+            raise FlightSearchError("QUERY_CANCELLED", "航班查询已取消")
+        if time.monotonic() >= self.deadline:
+            raise FlightSearchError("SEARCH_TIMEOUT", "航班查询超时，请稍后重试")
+
+    def _sleep(self, seconds):
+        self._check_interrupt()
+        self.cancel_event.wait(min(seconds, max(0, self.deadline - time.monotonic())))
+        self._check_interrupt()
+
+    def _page_text(self):
+        # Read rendered text, not script bundles containing generic 'login' or
+        # 'captcha' identifiers. Fallback also removes scripts/styles/comments.
+        text = self.page.run_js('return document.body ? document.body.innerText : ""')
+        if isinstance(text, str):
+            return text.lower()
+        html = self.page.html or ""
+        html = re.sub(r'<(script|style)\b[^>]*>.*?</\1>|<!--.*?-->', '', html, flags=re.I | re.S)
+        return unescape(re.sub(r'<[^>]+>', ' ', html)).lower()
+
+    def _page_state(self):
+        self._check_interrupt()
+        if 'whaleguard block' in (self.page.html or '').lower():
+            return 'blocked'
+        password = self.page.ele('css:input[type="password"]', timeout=0.1)
+        if password and password.states.is_displayed:
+            return 'login'
+        for selector in ('.captcha', '#captcha', '.slide-verify', '.nc-container', '#nc_1_wrapper', '.geetest'):
+            element = self.page.ele(f'css:{selector}', timeout=0.1)
+            if element and element.states.is_displayed:
+                return 'captcha'
+        text = self._page_text()
+        if any(word in text for word in ('账号密码登录', '请登录后', '登录后继续', '请先登录', 'sign in to continue')):
+            return 'login'
+        if any(word in text for word in ('验证码', '安全验证', '人机验证', '滑动验证', '请按顺序点选',
+                                        '向右滑动填充拼图', '拖动滑块', '请完成验证', 'captcha', 'verify you are human')):
+            return 'captcha'
+        if re.search(r'(?:暂无|未找到|没有找到)[^。\n]{0,40}航班', text) or any(word in text for word in ('无搜索结果', 'no flights found')):
+            return 'empty'
+        if any(word in text for word in ('访问受限', '页面不存在', '系统错误', '服务异常')):
+            return 'error'
+        return 'unknown'
 
     def _create_new_browser(self):
         """
@@ -301,6 +427,7 @@ class FlightRouteSearcher:
 
         每次调用都会生成不同的浏览器指纹，模拟不同用户访问
         """
+        self._check_interrupt()
         # 关闭旧的浏览器（如果存在）
         if self.page:
             try:
@@ -329,19 +456,17 @@ class FlightRouteSearcher:
                     logger.warning("  1. 在主界面点击「启动服务」时选择「清除Cookie」")
                     logger.warning("  2. 或手动关闭所有 Chrome/Edge 进程后重试")
 
-                logger.info("尝试使用默认配置创建浏览器（不使用用户数据目录）...")
-
-                # 尝试不使用用户数据目录
-                co_fallback = create_browser_options(self.headless, use_user_data=False)
-                self.page = ChromiumPage(co_fallback)
-                logger.warning("使用默认配置创建浏览器成功（Cookie 将不会被保存，可能需要重新验证）")
+                # Never bypass the profile lock or attach to an unrelated browser.
+                raise FlightSearchError("BROWSER_START_FAILED", f"无法启动独立航班浏览器：{browser_error}") from browser_error
 
             # 添加随机延迟，模拟真实用户行为
             delay = random.uniform(0.5, 1.5)
-            time.sleep(delay)
+            self._sleep(delay)
 
             logger.info("浏览器实例创建成功")
 
+        except FlightSearchError:
+            raise
         except Exception as e:
             logger.error(f"创建浏览器失败: {e}")
             raise RuntimeError(f"无法创建浏览器实例: {e}")
@@ -397,39 +522,45 @@ class FlightRouteSearcher:
             # 这不是“没有航班”，必须向上层报告数据源不可用。
             initial_html = (self.page.html or "").lower()
             if "whaleguard block" in initial_html:
-                raise RuntimeError("携程 WhaleGuard 已拦截当前网络/IP，请更换网络或完成验证")
+                raise FlightSearchError("SOURCE_BLOCKED", "携程 WhaleGuard 已拦截当前网络/IP，请更换网络或完成验证")
 
             # 检测是否有验证码或需要登录
             needs_action, action_type = self._detect_captcha_or_login()
             if needs_action:
                 if action_type == 'login':
-                    logger.warning("检测到需要登录！打开浏览器让用户登录...")
+                    logger.warning("检测到需要登录！请在浏览器中手动登录...")
                 else:
-                    logger.warning("检测到验证码！尝试使用非无头模式让用户手动处理...")
+                    logger.warning("检测到验证码！请在浏览器中手动完成验证...")
 
-                # 关闭当前浏览器
-                self.page.quit()
-                self.page = None
-
-                # 使用非无头模式重新创建浏览器，传递操作类型
-                self._create_new_browser_for_captcha(search_url, action_type or 'captcha')
+                if self.headless:
+                    # Headless browsers cannot present a challenge to the user.
+                    self.page.quit()
+                    self.page = None
+                    self._create_new_browser_for_captcha(search_url, action_type or 'captcha')
+                else:
+                    # Keep the visible browser and the exact challenge already
+                    # displayed; reopening it can invalidate the verification.
+                    self._wait_for_captcha_completion(action_type or 'captcha')
 
                 # 再次检测是否已处理
                 needs_action_again, _ = self._detect_captcha_or_login()
                 if needs_action_again:
-                    raise RuntimeError("携程验证码/登录仍未处理，无法继续查询")
+                    raise FlightSearchError("VERIFICATION_REQUIRED", "携程验证码/登录仍未处理，无法继续查询")
 
-            # 智能滚动加载更多内容
-            self._intelligent_scroll_for_content()
-
-            # 智能等待页面加载完成
-            self._wait_for_page_ready()
-
-            # 等待关键元素出现
-            self._wait_for_flight_content()
-
-            # 解析航班信息
-            flights = self._parse_flights()
+            try:
+                flights = self._load_and_parse()
+            except FlightSearchError as exc:
+                # Challenges can appear after the initial HTML has loaded.
+                if exc.code != 'VERIFICATION_REQUIRED' or needs_action:
+                    raise
+                action_type = self._page_state()
+                if self.headless:
+                    self.close()
+                    self._create_new_browser_for_captcha(search_url, 'login' if action_type == 'login' else 'captcha')
+                else:
+                    self._wait_for_captcha_completion('login' if action_type == 'login' else 'captcha')
+                flights = self._load_and_parse()
+            self._check_interrupt()
 
             logger.info(f"搜索完成，找到 {len(flights)} 条航班信息")
             return flights
@@ -448,81 +579,19 @@ class FlightRouteSearcher:
                 except:
                     pass
 
+    def _load_and_parse(self):
+        self._intelligent_scroll_for_content()
+        self._wait_for_page_ready()
+        self._wait_for_flight_content()
+        self._check_interrupt()
+        return self._parse_flights()
+
     def _detect_captcha_or_login(self) -> tuple:
-        """
-        检测页面是否有验证码或需要登录
-
-        Returns:
-            tuple: (需要处理, 类型) - 类型可以是 'captcha', 'login', 或 None
-        """
-        time.sleep(2)  # 等待页面加载
-
-        # 检查常见的验证码元素
-        captcha_selectors = [
-            'css:.captcha',
-            'css:#captcha',
-            'css:.verify',
-            'css:#verify',
-            'css:.slide-verify',
-            'css:.nc-container',  # 阿里云滑块验证
-            'css:#nc_1_wrapper',
-            'css:.geetest',  # 极验验证码
-        ]
-
-        for selector in captcha_selectors:
-            try:
-                element = self.page.ele(selector, timeout=1)
-                if element:
-                    logger.warning(f"检测到验证码元素: {selector}")
-                    return (True, 'captcha')
-            except:
-                pass
-
-        # 检查是否需要登录
-        login_selectors = [
-            'css:.login-btn',
-            'css:#login',
-            'css:.login-box',
-            'css:.login-form',
-            'css:.signin',
-            'css:[data-ubt="login_btn"]',
-        ]
-
-        for selector in login_selectors:
-            try:
-                element = self.page.ele(selector, timeout=1)
-                if element:
-                    logger.warning(f"检测到登录元素: {selector}")
-                    return (True, 'login')
-            except:
-                pass
-
-        # 检查页面内容是否包含验证或登录相关文字
-        try:
-            page_text = self.page.html[:5000].lower()
-
-            # 先检查是否有航班内容，如果有就不需要处理
-            flight_items = self.page.eles('css:.flight-item', timeout=1)
-            if len(flight_items) > 0:
-                return (False, None)
-
-            # 检查验证码关键字
-            captcha_keywords = ['验证', 'verify', 'captcha', '滑动', '安全验证', 'whaleguard block']
-            for keyword in captcha_keywords:
-                if keyword in page_text:
-                    logger.warning(f"页面包含验证关键字: {keyword}")
-                    return (True, 'captcha')
-
-            # 检查登录关键字
-            login_keywords = ['请登录', '立即登录', '登录后', 'sign in', 'login']
-            for keyword in login_keywords:
-                if keyword in page_text:
-                    logger.warning(f"页面包含登录关键字: {keyword}")
-                    return (True, 'login')
-        except:
-            pass
-
-        return (False, None)
+        self._sleep(2)
+        state = self._page_state()
+        if state == 'blocked':
+            raise FlightSearchError("SOURCE_BLOCKED", "携程 WhaleGuard 已拦截当前网络/IP")
+        return (state in ('captcha', 'login'), state if state in ('captcha', 'login') else None)
 
     def _detect_captcha(self) -> bool:
         """
@@ -535,48 +604,17 @@ class FlightRouteSearcher:
         return needs_action
 
     def _check_page_abnormal(self):
-        """
-        检查页面是否异常（验证码、无航班提示、错误页面等）
-        如果发现异常，记录详细日志
-        """
-        try:
-            page_text = self.page.html.lower()
-
-            # 检查验证码
-            captcha_keywords = ['验证', 'verify', 'captcha', '滑动', '安全验证', '人机验证', 'whaleguard block']
-            for keyword in captcha_keywords:
-                if keyword in page_text:
-                    logger.warning(f"⚠️ 页面检测到验证码关键字: {keyword}")
-                    logger.warning("💡 建议：下次启动时选择「清除Cookie」，首次查询会弹出浏览器让您手动验证")
-                    return
-
-            # 检查无航班提示
-            no_flight_keywords = ['暂无航班', '没有找到', '未找到航班', 'no flight', '无搜索结果']
-            for keyword in no_flight_keywords:
-                if keyword in page_text:
-                    logger.info(f"ℹ️ 页面提示: {keyword}（可能该航线确实无航班）")
-                    return
-
-            # 检查登录要求
-            login_keywords = ['请登录', '立即登录', '登录后', 'sign in', 'login']
-            for keyword in login_keywords:
-                if keyword in page_text:
-                    logger.warning(f"⚠️ 页面要求登录: {keyword}")
-                    return
-
-            # 检查错误页面
-            error_keywords = ['页面不存在', '404', '500', '系统错误', 'error', '访问受限']
-            for keyword in error_keywords:
-                if keyword in page_text:
-                    logger.error(f"❌ 页面错误: {keyword}")
-                    return
-
-            # 未找到明确原因
-            logger.warning("❓ 未找到航班，且无法确定具体原因")
-            logger.info(f"当前页面URL: {self.page.url}")
-
-        except Exception as e:
-            logger.debug(f"页面异常检查出错: {e}")
+        """Only an explicit empty-state is a successful zero-flight response."""
+        state = self._page_state()
+        if state == 'empty':
+            return
+        if state == 'blocked':
+            raise FlightSearchError("SOURCE_BLOCKED", "携程 WhaleGuard 已拦截当前网络/IP")
+        if state in ('captcha', 'login'):
+            raise FlightSearchError("VERIFICATION_REQUIRED", "携程需要完成验证码或登录，未取得航班数据")
+        if state == 'error':
+            raise FlightSearchError("SOURCE_ERROR", "携程页面访问受限或服务异常")
+        raise FlightSearchError("CONTENT_NOT_READY", "航班页面未加载完成或结构已变化，不能判断为无航班")
 
     def _create_new_browser_for_captcha(self, url: str, action_type: str = 'captcha'):
         """
@@ -598,6 +636,11 @@ class FlightRouteSearcher:
         # 访问页面
         self.page.get(url)
 
+        self._wait_for_captcha_completion(action_type)
+
+    def _wait_for_captcha_completion(self, action_type: str = 'captcha'):
+        """Wait for a person to complete the site's own challenge in this page."""
+
         # 等待页面加载或用户处理验证码/登录（最多等待120秒，给用户足够时间）
         logger.info("=" * 50)
         if action_type == 'login':
@@ -609,40 +652,53 @@ class FlightRouteSearcher:
         logger.info("⚠️ 最多等待 120 秒，请耐心操作...")
         logger.info("=" * 50)
 
-        min_flight_count = 3  # 至少要有3个航班才认为加载成功
+        min_flight_count = 1  # 少量航班的航线也能完成验证
         consecutive_success_needed = 2  # 连续2次检测到航班才确认成功
         consecutive_success = 0
 
-        for i in range(120):  # 增加到120秒
-            time.sleep(1)
+        deadline = min(self.deadline, time.monotonic() + CAPTCHA_TIMEOUT_SECONDS)
+        next_notice = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            self._sleep(min(1, max(0, deadline - time.monotonic())))
 
             # 检查是否有航班列表出现
             try:
+                state = self._page_state()
+                if state == 'blocked':
+                    raise FlightSearchError("SOURCE_BLOCKED", "携程 WhaleGuard 已拦截当前网络/IP")
+                if state in ('captcha', 'login'):
+                    consecutive_success = 0
+                    continue
+                if state == 'empty':
+                    return
                 flight_items = self.page.eles('css:.flight-item', timeout=1)
                 if len(flight_items) >= min_flight_count:
                     consecutive_success += 1
                     if consecutive_success >= consecutive_success_needed:
                         logger.info(f"✅ 页面加载成功，检测到 {len(flight_items)} 个航班")
                         # 额外等待确保数据完全加载
-                        time.sleep(3)
+                        self._sleep(3)
                         return
                     else:
                         logger.info(f"检测到 {len(flight_items)} 个航班，等待确认...")
                 else:
                     consecutive_success = 0  # 重置计数器
-            except:
+            except FlightSearchError:
+                raise
+            except Exception:
                 consecutive_success = 0
                 pass
 
             # 每15秒输出一次提示
-            if i > 0 and i % 15 == 0:
-                logger.info(f"⏳ 仍在等待处理... ({i}/120秒)")
+            if time.monotonic() >= next_notice:
+                next_notice = time.monotonic() + 15
+                logger.info("⏳ 仍在等待处理验证码或登录...")
                 if action_type == 'login':
                     logger.info("💡 提示：请在浏览器窗口中完成登录")
                 else:
                     logger.info("💡 提示：请在浏览器窗口中完成验证码")
 
-        logger.warning("⚠️ 页面加载超时（120秒），请检查网络或手动刷新页面")
+        raise FlightSearchError("VERIFICATION_TIMEOUT", "等待验证码/登录超时，请完成验证后重新查询")
 
     def _detect_captcha_fast(self) -> bool:
         """
@@ -683,9 +739,10 @@ class FlightRouteSearcher:
             scroll_distances = [500, 800, 1200]
 
             for i, distance in enumerate(scroll_distances, 1):
+                self._check_interrupt()
                 self.page.scroll(distance)
                 logger.debug(f"第{i}次向下滚动 {distance}px")
-                time.sleep(1.5)  # 等待内容加载
+                self._sleep(1.5)
 
                 # 检查是否有新的航班元素加载出来
                 flight_elements = self.page.eles('css:.flight-item', timeout=1)
@@ -694,30 +751,27 @@ class FlightRouteSearcher:
             # 滚动回到顶部，确保能看到所有航班
             logger.debug("滚动回到页面顶部")
             self.page.scroll(-2000)  # 向上滚动回到顶部
-            time.sleep(1)
+            self._sleep(1)
 
+        except FlightSearchError:
+            raise
         except Exception as e:
-            logger.warning(f"智能滚动过程中出错：{e}")
+            raise FlightSearchError("PAGE_DISCONNECTED", f"加载航班列表失败：{e}") from e
     def _wait_for_flight_content(self, timeout=30):
         """等待航班内容加载"""
         logger.debug("等待航班内容加载...")
 
-        # 方法1：等待航班容器出现
-        flight_container = self.page.ele('css:.body-wrapper', timeout=timeout)
-        if flight_container:
-            logger.debug("找到航班容器")
-
-            # 方法2：等待航班列表出现
-            flight_items = self.page.ele('css:.flight-item', timeout=10)
-            if flight_items:
-                logger.debug("航班列表加载完成")
-            else:
-                logger.debug("等待航班列表超时，尝试其他解析方法...")
-
-                # 等待可能的加载指示器消失
-                self._wait_for_loading_complete()
-        else:
-            logger.warning("航班容器未找到")
+        deadline = min(self.deadline, time.monotonic() + timeout)
+        while time.monotonic() < deadline:
+            self._check_interrupt()
+            if self.page.ele('css:.flight-item', timeout=0.5):
+                return
+            state = self._page_state()
+            if state != 'unknown':
+                self._check_page_abnormal()
+                return  # explicit empty-state
+            self._sleep(0.5)
+        self._check_page_abnormal()
     def _wait_for_page_ready(self, timeout=30):
         """智能等待页面完全加载"""
         logger.debug("等待页面完全加载...")
@@ -725,11 +779,12 @@ class FlightRouteSearcher:
         # 方法1：等待 document.readyState 为 complete
         start_time = time.time()
         while time.time() - start_time < timeout:
+            self._check_interrupt()
             ready_state = self.page.run_js("return document.readyState")
             if ready_state == "complete":
                 logger.debug("页面DOM加载完成")
                 break
-            time.sleep(0.5)
+            self._sleep(0.5)
         else:
             logger.debug("页面加载超时，继续执行...")
 
@@ -745,6 +800,7 @@ class FlightRouteSearcher:
         """等待Ajax请求完成"""
         start_time = time.time()
         while time.time() - start_time < timeout:
+            self._check_interrupt()
             try:
                 # 检查是否有活跃的Ajax请求
                 ajax_complete = self.page.run_js("""
@@ -757,20 +813,21 @@ class FlightRouteSearcher:
                     return True
             except:
                 pass
-            time.sleep(0.2)
+            self._sleep(0.2)
         return False
 
     def _wait_for_jquery_ready(self, timeout=10):
         """等待jQuery加载完成"""
         start_time = time.time()
         while time.time() - start_time < timeout:
+            self._check_interrupt()
             try:
                 jquery_active = self.page.run_js("return typeof jQuery !== 'undefined' && jQuery.active === 0")
                 if jquery_active:
                     return True
             except:
                 pass
-            time.sleep(0.2)
+            self._sleep(0.2)
         return False
     def _wait_for_loading_complete(self, timeout=15):
         """等待加载指示器消失"""
@@ -792,15 +849,18 @@ class FlightRouteSearcher:
                 # 等待加载指示器消失
                 start_time = time.time()
                 while time.time() - start_time < timeout:
+                    self._check_interrupt()
                     loader = self.page.ele(f'css:{selector}', timeout=1)
                     if not loader:
                         break
-                    time.sleep(0.5)
+                    self._sleep(0.5)
                 else:
                     continue
                 logger.debug(f"加载指示器 {selector} 已消失")
                 break
-            except:
+            except FlightSearchError:
+                raise
+            except Exception:
                 continue
 
     def _parse_flights(self) -> List[Dict[str, Any]]:
@@ -808,6 +868,10 @@ class FlightRouteSearcher:
         flights = []
 
         try:
+            self._check_interrupt()
+            state = self._page_state()
+            if state in ('blocked', 'captcha', 'login', 'error'):
+                self._check_page_abnormal()
             # 查找航班容器
             flight_list = self.page.ele('css:.body-wrapper')
             if not flight_list:
@@ -826,11 +890,10 @@ class FlightRouteSearcher:
 
             logger.info(f"找到 {len(flight_containers)} 个航班容器")
 
-            # 选取存在航班号的10个航班
+            # Parse every loaded flight before the Provider applies time filters.
             valid_flights_count = 0
             for i, container in enumerate(flight_containers):
-                if valid_flights_count >= 10:  # 已找到10个有效航班，停止搜索
-                    break
+                self._check_interrupt()
 
                 try:
                     flight_info = self._parse_flight_container(container, i + 1)
@@ -842,16 +905,21 @@ class FlightRouteSearcher:
                     else:
                         logger.debug(f"航班容器 {i+1} 无有效航班号，跳过")
 
+                except FlightSearchError:
+                    raise
                 except Exception as e:
-                    logger.error(f"解析航班容器 {i+1} 出错: {str(e)}")
-                    continue
+                    raise FlightSearchError("PARSE_FAILED", f"解析第 {i+1} 条航班失败：{e}") from e
 
+            if not flights:
+                raise FlightSearchError("PARSE_FAILED", "页面存在航班，但未能解析有效航班号")
             logger.info(f"成功找到 {valid_flights_count} 个有航班号的航班")
             return flights
             
+        except FlightSearchError:
+            raise
         except Exception as e:
             logger.error(f"解析航班信息失败: {str(e)}", exc_info=True)
-            return []
+            raise FlightSearchError("PARSE_FAILED", f"航班页面解析失败：{e}") from e
     
     def _parse_flight_container(self, container, index: int) -> Optional[Dict[str, Any]]:
         """
@@ -973,19 +1041,10 @@ class FlightRouteSearcher:
             price_span = container.ele('css:.price', timeout=1)
             if price_span:
                 price_text = price_span.text.strip()
-                # 处理价格格式
-                if '¥' in price_text:
-                    flight_info['价格'] = price_text
-                    # 提取纯数字价格用于排序
-                    price_num_match = re.search(r'(\d+)', price_text)
-                    if price_num_match:
-                        flight_info['价格数值'] = int(price_num_match.group(1))
-                else:
-                    # 提取数字价格
-                    price_match = re.search(r'(\d+)', price_text)
-                    if price_match:
-                        flight_info['价格'] = f"¥{price_match.group(1)}"
-                        flight_info['价格数值'] = int(price_match.group(1))
+                price_match = re.search(r'(\d+(?:\.\d+)?)', price_text.replace(',', '').replace('，', ''))
+                if price_match:
+                    flight_info['价格'] = price_text if '¥' in price_text else f"¥{price_match.group(1)}"
+                    flight_info['价格数值'] = float(price_match.group(1))
 
             # 检查是否有足够的信息
             if any(key in flight_info for key in ['航班号', '出发时间', '价格']):
@@ -996,7 +1055,7 @@ class FlightRouteSearcher:
 
         except Exception as e:
             logger.error(f"解析航班容器 {index} 详细信息失败: {str(e)}")
-            return None
+            raise FlightSearchError("PARSE_FAILED", f"航班详情解析失败：{e}") from e
     
     def close(self):
         """关闭浏览器（如果还有运行中的实例）"""
@@ -1009,7 +1068,32 @@ class FlightRouteSearcher:
                 logger.debug(f"关闭浏览器时出错: {e}")
 
 
-def searchFlightRoutes(departure_city: str, destination_city: str, departure_date: str) -> Dict[str, Any]:
+def searchFlightRoutes(departure_city: str, destination_city: str, departure_date: str,
+                       query_id: str = "") -> Dict[str, Any]:
+    if len(query_id) > 128:
+        return {"status": "error", "error_code": "INVALID_QUERY_ID", "message": "查询标识无效"}
+    cancel_event = threading.Event()
+    with _REGISTRY_LOCK:
+        if query_id:
+            if query_id in _ACTIVE_QUERIES:
+                return {"status": "error", "error_code": "DUPLICATE_QUERY", "message": "查询标识已在使用"}
+            if _CANCELLED_QUERIES.pop(query_id, None) is not None:
+                cancel_event.set()
+            _ACTIVE_QUERIES[query_id] = cancel_event
+    try:
+        with _browser_session(cancel_event):
+            if cancel_event.is_set():
+                raise FlightSearchError("QUERY_CANCELLED", "航班查询已取消")
+            return _search_flight_routes(departure_city, destination_city, departure_date, cancel_event)
+    except FlightSearchError as exc:
+        return {"status": "error", "error_code": exc.code, "message": str(exc)}
+    finally:
+        with _REGISTRY_LOCK:
+            _ACTIVE_QUERIES.pop(query_id, None)
+
+
+def _search_flight_routes(departure_city: str, destination_city: str, departure_date: str,
+                         cancel_event=None) -> Dict[str, Any]:
     """
     根据出发地、目的地和出发日期查询航班路线
 
@@ -1033,8 +1117,11 @@ def searchFlightRoutes(departure_city: str, destination_city: str, departure_dat
                 "error_code": "INVALID_PARAMS"
             }
         
-        # 检查依赖是否可用
-        if not DRISSION_PAGE_AVAILABLE:
+        # Safari uses native macOS automation rather than DrissionPage.
+        browser_engine = os.environ.get("FLIGHT_BROWSER_ENGINE", "chromium").lower()
+        if browser_engine not in ("chromium", "safari"):
+            raise FlightSearchError("INVALID_BROWSER_ENGINE", "FLIGHT_BROWSER_ENGINE 仅支持 chromium 或 safari")
+        if browser_engine == "chromium" and not DRISSION_PAGE_AVAILABLE:
             logger.error("DrissionPage库未安装")
             return {
                 "status": "error",
@@ -1089,7 +1176,14 @@ def searchFlightRoutes(departure_city: str, destination_city: str, departure_dat
             }
         
         # 创建搜索器并搜索
-        searcher = FlightRouteSearcher(headless=True)
+        # This local website can present Ctrip's verification to the person
+        # searching. Set FLIGHT_BROWSER_VISIBLE=0 for a headless deployment.
+        visible = os.environ.get("FLIGHT_BROWSER_VISIBLE", "1").lower() not in ("0", "false", "no")
+        if browser_engine == "safari":
+            from .safari_flight_search import SafariFlightSearcher
+            searcher = SafariFlightSearcher(get_airport_code, cancel_event=cancel_event)
+        else:
+            searcher = FlightRouteSearcher(headless=not visible, cancel_event=cancel_event)
 
         try:
             flights = searcher.search_flights(departure_city, destination_city, departure_date)
@@ -1145,7 +1239,7 @@ def searchFlightRoutes(departure_city: str, destination_city: str, departure_dat
         return {
             "status": "error",
             "message": f"查询航班路线失败: {str(e)}",
-            "error_code": "SEARCH_FAILED"
+            "error_code": getattr(e, "code", "SEARCH_FAILED")
         }
 
 

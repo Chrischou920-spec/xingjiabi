@@ -39,12 +39,17 @@ class McpProcessClient:
         cwd: str | Path | None = None,
         env: dict[str, str] | None = None,
         startup_timeout: float = 30,
+        serialize_calls: bool = False,
     ):
         self.command = command
         self.args = list(args or [])
         self.cwd = str(cwd) if cwd else None
         self.env = env
         self.startup_timeout = startup_timeout
+        self.serialize_calls = serialize_calls
+        self._call_lock = threading.RLock()
+        self._startup_lock = threading.RLock()
+        self._draining: tuple[int, queue.Queue] | None = None
         self._process: subprocess.Popen[str] | None = None
         self._reader_thread: threading.Thread | None = None
         self._stderr_thread: threading.Thread | None = None
@@ -63,6 +68,10 @@ class McpProcessClient:
         return "\n".join(self._stderr_lines)
 
     def start(self) -> None:
+        with self._startup_lock:
+            self._start()
+
+    def _start(self) -> None:
         if self.running:
             return
         try:
@@ -103,13 +112,46 @@ class McpProcessClient:
             raise
 
     def call_tool(self, name: str, arguments: dict[str, Any], timeout: float = 60) -> dict[str, Any]:
+        if self.serialize_calls:
+            from .query_control import check_cancelled
+            while not self._call_lock.acquire(timeout=0.1):
+                check_cancelled()
+            try:
+                check_cancelled()
+                # A timeout does not stop the upstream worker. Do not send another
+                # query until that worker has actually replied or the process exited.
+                if self._draining and self.running:
+                    request_id, response_queue = self._draining
+                    try:
+                        response_queue.get_nowait()
+                    except queue.Empty:
+                        raise McpCallError("上一次航班查询仍在清理，请稍后重试")
+                    with self._pending_lock:
+                        self._pending.pop(request_id, None)
+                self._draining = None
+                return self._call_tool(name, arguments, timeout)
+            finally:
+                self._call_lock.release()
+        return self._call_tool(name, arguments, timeout)
+
+    def _call_tool(self, name: str, arguments: dict[str, Any], timeout: float) -> dict[str, Any]:
         if not self.running:
             self.start()
+        from .query_control import check_cancelled
+        check_cancelled()  # Cancellation may have arrived during initialization.
         return self._request(
             "tools/call",
             {"name": name, "arguments": arguments},
             timeout=timeout,
         )
+
+    def interrupt_tool(self, name: str, arguments: dict[str, Any]) -> None:
+        """Out-of-band control call, intentionally not blocked by the search lock."""
+        if self.running:
+            try:
+                self._request("tools/call", {"name": name, "arguments": arguments}, timeout=5)
+            except McpClientError:
+                pass  # Search remains serialized even if cancellation delivery failed.
 
     def call_tool_text(self, name: str, arguments: dict[str, Any], timeout: float = 60) -> str:
         result = self.call_tool(name, arguments, timeout)
@@ -141,6 +183,8 @@ class McpProcessClient:
             try:
                 message = response_queue.get(timeout=timeout)
             except queue.Empty as exc:
+                if self.serialize_calls and method == "tools/call" and params.get("name") != "cancelFlightSearch":
+                    self._draining = (request_id, response_queue)
                 detail = f"；服务日志：{self.recent_stderr}" if self.recent_stderr else ""
                 raise McpTimeoutError(f"MCP 调用 {method} 超时{detail}") from exc
             if "error" in message:
@@ -152,7 +196,8 @@ class McpProcessClient:
             return result
         finally:
             with self._pending_lock:
-                self._pending.pop(request_id, None)
+                if not self._draining or self._draining[0] != request_id:
+                    self._pending.pop(request_id, None)
 
     def _notify(self, method: str, params: dict[str, Any]) -> None:
         self._write({"jsonrpc": "2.0", "method": method, "params": params})
@@ -185,7 +230,10 @@ class McpProcessClient:
             with self._pending_lock:
                 response_queue = self._pending.get(request_id)
             if response_queue:
-                response_queue.put(message)
+                try:
+                    response_queue.put_nowait(message)
+                except queue.Full:
+                    pass
 
     def _read_stderr(self) -> None:
         assert self._process and self._process.stderr
@@ -217,6 +265,7 @@ class McpProcessClient:
                 thread.join(timeout=1)
         self._reader_thread = None
         self._stderr_thread = None
+        self._draining = None
         with self._pending_lock:
             pending = list(self._pending.values())
             self._pending.clear()

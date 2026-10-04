@@ -281,7 +281,7 @@ def register_tools():
     
     # Flight route search tool
     @mcp.tool()
-    def searchFlightRoutes(departure_city: str, destination_city: str, departure_date: str):
+    def searchFlightRoutes(departure_city: str, destination_city: str, departure_date: str, query_id: str = ""):
         """航班路线查询 - 根据出发地、目的地和出发日期查询可用航班信息"""
         if departure_city not in ALLOWED_MAINLAND_CITIES or destination_city not in ALLOWED_MAINLAND_CITIES:
             return {
@@ -290,7 +290,12 @@ def register_tools():
                 "error_code": "DOMESTIC_ONLY",
             }
         logger.debug(f"调用航班路线查询工具: departure_city={departure_city}, destination_city={destination_city}, departure_date={departure_date}")
-        return flight_search_tools.searchFlightRoutes(departure_city, destination_city, departure_date)
+        return flight_search_tools.searchFlightRoutes(departure_city, destination_city, departure_date, query_id)
+
+    @mcp.tool()
+    def cancelFlightSearch(query_id: str):
+        """取消指定航班查询，不影响其他查询或浏览器。"""
+        return flight_search_tools.cancelFlightSearch(query_id)
     
     # Date tools
     @mcp.tool()

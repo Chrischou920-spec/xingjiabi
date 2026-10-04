@@ -66,6 +66,20 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual([item.mode for item in plans[0].outbound], [TransportMode.TRAIN, TransportMode.FLIGHT])
         self.assertEqual(plans[0].local_transfer_cost, 50)
 
+    def test_return_cannot_start_before_outbound_arrival(self):
+        inventory = [
+            TransportSegment(TransportMode.TRAIN, "G1", "上海", "北京", datetime(2026, 10, 1, 8), datetime(2026, 10, 1, 12), 300),
+            TransportSegment(TransportMode.TRAIN, "G2", "北京", "上海", datetime(2026, 10, 1, 10), datetime(2026, 10, 1, 15), 300),
+        ]
+        planner = DomesticTripPlanner([InMemoryProvider(TransportMode.TRAIN, inventory)])
+        plans = planner.plan(request(
+            outbound_after=datetime(2026, 10, 1, 6),
+            outbound_before=datetime(2026, 10, 1, 9),
+            return_after=datetime(2026, 10, 1, 9),
+            return_before=datetime(2026, 10, 1, 11),
+        ))
+        self.assertEqual(plans, [])
+
 
 if __name__ == "__main__":
     unittest.main()

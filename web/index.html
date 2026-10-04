@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#edf2f6" />
+    <title>行价比 · 出行规划</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">跳转到主要内容</a>
+    <svg class="icon-library" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <symbol id="icon-grid" viewBox="0 0 24 24"><path d="M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z" /></symbol>
+      <symbol id="icon-list" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M8 9h8M8 13h8M8 17h5"/></symbol>
+      <symbol id="icon-pin" viewBox="0 0 24 24"><path d="M19 10c0 5-7 11-7 11S5 15 5 10a7 7 0 1 1 14 0Z"/><circle cx="12" cy="10" r="2.3"/></symbol>
+      <symbol id="icon-swap" viewBox="0 0 24 24"><path d="M4 8h15m-4-4 4 4-4 4M20 16H5m4-4-4 4 4 4"/></symbol>
+      <symbol id="icon-calendar" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M7 3v4M17 3v4M3 10h18"/></symbol>
+      <symbol id="icon-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></symbol>
+      <symbol id="icon-train" viewBox="0 0 24 24"><rect x="5" y="3" width="14" height="16" rx="4"/><path d="M5 12h14M8 22l2-3M16 22l-2-3M9 8h2M14 8h1"/></symbol>
+      <symbol id="icon-plane" viewBox="0 0 24 24"><path d="M12 2c-.8 0-1.5.8-1.5 2v5L3 13v2l7.5-2v5l-3 2v1l4.5-1 4.5 1v-1l-3-2v-5l7.5 2v-2l-7.5-4V4c0-1.2-.7-2-1.5-2Z"/></symbol>
+      <symbol id="icon-coin" viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></symbol>
+      <symbol id="icon-scale" viewBox="0 0 24 24"><path d="M12 3v18M5 7h14M3 7l-2 6h6L5 7Zm16 0-2 6h6l-2-6ZM8 21h8"/></symbol>
+      <symbol id="icon-bolt" viewBox="0 0 24 24"><path d="m13 2-9 11h7l-1 9 10-12h-7V2Z"/></symbol>
+      <symbol id="icon-wallet" viewBox="0 0 24 24"><rect x="3" y="6" width="18" height="15" rx="3"/><path d="M3 9V6a3 3 0 0 1 3-3h12M15 13h6M16.5 13h.1"/></symbol>
+      <symbol id="icon-home" viewBox="0 0 24 24"><path d="m3 11 9-8 9 8v10H3V11Z"/><path d="M9 21v-7h6v7"/></symbol>
+      <symbol id="icon-check" viewBox="0 0 24 24"><path d="m5 12 5 5L20 7"/></symbol>
+      <symbol id="icon-arrow" viewBox="0 0 24 24"><path d="M4 12h16m-6-6 6 6-6 6"/></symbol>
+      <symbol id="icon-warning" viewBox="0 0 24 24"><path d="m12 3 10 18H2L12 3Z"/><path d="M12 9v5M12 18h.01"/></symbol>
+      <symbol id="icon-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7h.01"/></symbol>
+    </svg>
+
+    <div class="site-shell">
+      <header class="site-header">
+        <div class="brand">行价比<span class="brand-caption">出行工作台</span></div>
+        <nav class="page-nav" id="page-nav" aria-label="页面导航">
+          <span class="selection-indicator nav-indicator" id="nav-indicator" aria-hidden="true"></span>
+          <button class="nav-item is-active" id="nav-planning" type="button" aria-current="page"><svg class="icon" aria-hidden="true"><use href="#icon-grid" /></svg><span>行程规划</span></button>
+          <button class="nav-item" id="nav-results" type="button" disabled title="搜索后查看出行方案"><svg class="icon" aria-hidden="true"><use href="#icon-list" /></svg><span>出行方案</span><span class="nav-count" id="nav-count" hidden>0</span></button>
+        </nav>
+        <div class="source-indicator" id="source-indicator" role="status" aria-live="polite">
+          <span class="source-dot" aria-hidden="true"></span><span id="source-label">正在连接票务服务</span>
+        </div>
+      </header>
+
+      <div class="workspace">
+        <main class="main-panel" id="main-content" tabindex="-1">
+          <section id="planning-view" class="page-view" aria-labelledby="planning-title">
+            <div class="page-heading">
+              <div>
+                <p class="eyebrow"><span class="section-index">01</span> 行程规划</p>
+                <h1 id="planning-title" tabindex="-1">出行规划<span class="title-dot" aria-hidden="true">.</span></h1>
+                <p class="heading-description">选择城市与时间，比较火车和飞机的出行成本。</p>
+              </div>
+              <span class="heading-note"><svg class="icon" aria-hidden="true"><use href="#icon-pin" /></svg>中国大陆城市</span>
+            </div>
+
+            <form id="plan-form" novalidate>
+              <div class="error-summary" id="error-summary" role="alert" tabindex="-1" hidden></div>
+              <div class="planning-layout">
+              <div class="form-body surface">
+                <div class="form-section route-section">
+                <div class="section-heading"><h2>城市与路线</h2><label class="trip-switch"><span>往返</span><input id="round-trip" type="checkbox" role="switch" checked /><span class="switch-track" aria-hidden="true"></span></label></div>
+                <div class="route-card">
+                  <div class="route-field">
+                    <label for="origin">出发地</label>
+                    <input id="origin" name="origin" list="city-list" placeholder="选择城市" autocomplete="off" aria-describedby="origin-error" required />
+                    <span class="field-error" id="origin-error"></span>
+                  </div>
+                  <button class="swap-button" id="swap-cities" type="button" aria-label="交换出发地和目的地">
+                    <svg class="icon" aria-hidden="true"><use href="#icon-swap" /></svg>
+                  </button>
+                  <div class="route-field">
+                    <label for="destination">目的地</label>
+                    <input id="destination" name="destination" list="city-list" placeholder="选择城市" autocomplete="off" aria-describedby="destination-error" required />
+                    <span class="field-error" id="destination-error"></span>
+                  </div>
+                  <datalist id="city-list"></datalist>
+                </div>
+                </div>
+                <div class="date-grid form-section">
+                <div class="time-card">
+                  <div class="card-title"><svg class="icon" aria-hidden="true"><use href="#icon-calendar" /></svg><h2>去程</h2></div>
+                  <label class="input-label" for="outbound-date">出发日期</label>
+                  <input id="outbound-date" type="date" aria-describedby="outbound-date-error" required />
+                  <span class="field-error" id="outbound-date-error"></span>
+                  <div class="time-pair">
+                    <label>最早出发<input id="outbound-start" type="time" aria-describedby="outbound-start-error" required /><span class="field-error" id="outbound-start-error"></span></label>
+                    <span class="time-divider" aria-hidden="true">—</span>
+                    <label>最晚出发<input id="outbound-end" type="time" aria-describedby="outbound-end-error" required /><span class="field-error" id="outbound-end-error"></span></label>
+                  </div>
+                </div>
+                <div class="time-card" id="return-card">
+                  <div class="card-title"><svg class="icon" aria-hidden="true"><use href="#icon-calendar" /></svg><h2>返程</h2><span class="card-note" id="return-note">往返行程</span></div>
+                  <label class="input-label" for="return-date">返程出发日期</label>
+                  <input id="return-date" type="date" aria-describedby="return-date-error" required />
+                  <span class="field-error" id="return-date-error"></span>
+                  <div class="time-pair">
+                    <label>最早出发<input id="return-start" type="time" aria-describedby="return-start-error" required /><span class="field-error" id="return-start-error"></span></label>
+                    <span class="time-divider" aria-hidden="true">—</span>
+                    <label>最晚出发<input id="return-end" type="time" aria-describedby="return-end-error" required /><span class="field-error" id="return-end-error"></span></label>
+                  </div>
+                </div>
+                </div>
+                <div class="form-section options-section">
+                <fieldset class="mode-card">
+                  <legend>交通方式<span class="legend-hint">可多选</span></legend>
+                  <div class="choice-row two-up">
+                    <label class="choice"><input id="mode-train" type="checkbox" value="train" aria-describedby="mode-train-error" checked /><span><svg class="icon" aria-hidden="true"><use href="#icon-train" /></svg><span class="choice-text">高铁 / 火车</span><svg class="choice-check icon" aria-hidden="true"><use href="#icon-check" /></svg></span></label>
+                    <label class="choice"><input id="mode-flight" type="checkbox" value="flight" checked /><span><svg class="icon" aria-hidden="true"><use href="#icon-plane" /></svg><span class="choice-text">飞机</span><svg class="choice-check icon" aria-hidden="true"><use href="#icon-check" /></svg></span></label>
+                  </div>
+                  <span class="field-error" id="mode-train-error"></span>
+                </fieldset>
+                <fieldset class="preference-card">
+                  <legend>推荐偏好</legend>
+                  <div class="choice-row three-up" id="preference-choices">
+                    <span class="selection-indicator preference-indicator" id="preference-indicator" aria-hidden="true"></span>
+                    <label class="choice"><input type="radio" name="preference" value="cheapest" /><span><svg class="icon" aria-hidden="true"><use href="#icon-coin" /></svg>最省钱</span></label>
+                    <label class="choice"><input type="radio" name="preference" value="balanced" checked /><span><svg class="icon" aria-hidden="true"><use href="#icon-scale" /></svg>更均衡</span></label>
+                    <label class="choice"><input type="radio" name="preference" value="fastest" /><span><svg class="icon" aria-hidden="true"><use href="#icon-bolt" /></svg>最快到达</span></label>
+                  </div>
+                </fieldset>
+                <div class="budget-row">
+                  <div><label for="budget">总预算</label><p class="helper-text">包含票价、换乘和所选住宿费用</p></div>
+                  <div><div class="number-wrap"><span aria-hidden="true">¥</span><input id="budget" type="number" min="1" step="1" placeholder="不限" aria-describedby="budget-error" /></div><span class="field-error" id="budget-error"></span></div>
+                </div>
+                </div>
+                <details class="advanced-options form-section" id="advanced-options">
+                  <summary><span><svg class="icon" aria-hidden="true"><use href="#icon-home" /></svg>更多条件<span class="summary-hint">门禁与住宿</span></span><svg class="icon disclosure-icon" aria-hidden="true"><use href="#icon-arrow" /></svg></summary>
+                  <div class="advanced-grid">
+                  <div class="small-card">
+                    <label class="toggle-row" for="dorm-enabled"><span>返校门禁</span><span class="switch-control"><input id="dorm-enabled" type="checkbox" role="switch" /><span class="switch-track" aria-hidden="true"></span></span></label>
+                    <label class="input-label" for="dorm-time">返程需在此时间前到达</label>
+                    <input id="dorm-time" type="time" value="23:00" disabled aria-describedby="dorm-time-error" /><span class="field-error" id="dorm-time-error"></span>
+                  </div>
+                  <div class="small-card">
+                    <label class="toggle-row" for="accommodation"><span>跨夜住宿费用</span><span class="switch-control"><input id="accommodation" type="checkbox" role="switch" checked /><span class="switch-track" aria-hidden="true"></span></span></label>
+                    <label class="input-label" for="accommodation-cost">每晚住宿估算（元）</label>
+                    <div class="number-wrap"><span aria-hidden="true">¥</span><input id="accommodation-cost" type="number" min="0" step="1" value="200" aria-describedby="accommodation-cost-error" /></div><span class="field-error" id="accommodation-cost-error"></span>
+                  </div>
+                  </div>
+                </details>
+              </div>
+              <aside class="planning-aside" aria-label="当前行程摘要">
+                <details class="trip-preview" id="trip-preview" open>
+                  <summary class="preview-summary">
+                  <span class="preview-heading"><span>行程摘要</span><span class="preview-controls"><span class="preview-badge" id="preview-type">往返</span><svg class="icon disclosure-icon" aria-hidden="true"><use href="#icon-arrow" /></svg></span></span>
+                  <div class="preview-route"><div><span>出发地</span><strong id="preview-origin">上海</strong></div><svg class="icon" aria-hidden="true"><use href="#icon-arrow" /></svg><div><span>目的地</span><strong id="preview-destination">北京</strong></div></div>
+                  </summary>
+                  <div class="route-art" aria-hidden="true">
+                    <svg viewBox="0 0 280 76" fill="none">
+                      <path class="route-track" d="M14 62Q140-12 266 62" stroke="currentColor" stroke-width="1.2" stroke-dasharray="3 6"/>
+                      <circle cx="14" cy="62" r="3.5" fill="currentColor"/><circle cx="266" cy="62" r="3.5" fill="currentColor"/>
+                      <g transform="translate(140 25)">
+                        <circle r="21" class="route-vehicle-backdrop"/>
+                        <g id="route-vehicle"><g id="route-vehicle-heading" transform="rotate(90)"><use id="route-vehicle-use" href="#icon-plane" x="-16" y="-16" width="32" height="32" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></g></g>
+                      </g>
+                    </svg>
+                  </div>
+                  <dl class="preview-details"><div><dt>去程</dt><dd id="preview-outbound">—</dd></div><div id="preview-return-row"><dt>返程</dt><dd id="preview-return">—</dd></div><div><dt>交通</dt><dd id="preview-modes">火车 + 飞机</dd></div><div><dt>偏好</dt><dd id="preview-preference">更均衡</dd></div></dl>
+                  <div class="preview-budget"><span>预算上限</span><strong id="preview-budget">不限预算</strong></div>
+                </details>
+                <div class="search-action">
+                  <button class="primary-button" id="submit-button" type="submit"><span>搜索出行方案</span><svg class="icon" aria-hidden="true"><use href="#icon-arrow" /></svg></button>
+                  <p class="action-note">按当前条件查询 · 仅推荐直达方案</p>
+                </div>
+                <div class="query-status" id="query-status" role="status" aria-live="polite" hidden><span class="query-spinner" aria-hidden="true"></span><div><strong>正在查询票务</strong><p id="query-elapsed" aria-live="off">已等待 0 秒</p></div></div>
+                <div class="form-message" id="form-message" role="alert" tabindex="-1"></div>
+                <p class="data-note"><svg class="icon" aria-hidden="true"><use href="#icon-info" /></svg><span>票价与余票以购票平台为准，查询不会产生订单。</span></p>
+              </aside>
+              </div>
+            </form>
+          </section>
+
+          <section id="results-view" class="page-view" aria-labelledby="results-title" hidden>
+            <div class="page-heading results-heading">
+              <div><p class="eyebrow"><span class="section-index">02</span> 方案比较</p><h1 id="results-title" tabindex="-1">出行方案<span class="title-dot" aria-hidden="true">.</span></h1><p class="result-subtitle" id="result-subtitle"></p></div>
+              <button class="secondary-button" id="edit-search" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-swap" /></svg>修改条件</button>
+            </div>
+            <div id="results-message" class="results-message" role="status" aria-live="polite"></div>
+            <div class="results-overview" id="results-overview" hidden></div>
+            <div class="results-section-heading"><h2>推荐方案</h2><span id="recommendation-note">按所选偏好排序</span></div>
+            <div id="result-list" class="result-list"></div>
+            <details id="flight-results" class="surface flight-results" hidden>
+              <summary class="flight-results-heading">
+                <span><span class="eyebrow" id="flight-results-source">本次查询</span><span class="flight-title" id="flight-results-title">航班列表</span></span>
+                <span class="flight-summary-end"><span id="flight-results-count" class="flight-results-count"></span><svg class="icon disclosure-icon" aria-hidden="true"><use href="#icon-arrow" /></svg></span>
+              </summary>
+              <div id="flight-results-list"></div>
+            </details>
+            <p id="result-footnote" class="result-footnote"></p>
+          </section>
+        </main>
+      </div>
+      <footer class="site-footer"><span>行价比 · 本地出行规划</span><span>火车 / 飞机 / 往返比较</span></footer>
+    </div>
+  </body>
+</html>

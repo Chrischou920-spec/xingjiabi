@@ -35,6 +35,14 @@ class TransportSegment:
     def duration_minutes(self) -> int:
         return max(0, int((self.arrival_at - self.departure_at).total_seconds() // 60))
 
+    def to_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        data["mode"] = self.mode.value
+        data["departure_at"] = self.departure_at.isoformat()
+        data["arrival_at"] = self.arrival_at.isoformat()
+        data["duration_minutes"] = self.duration_minutes
+        return data
+
 
 @dataclass(frozen=True)
 class JourneyRequest:
@@ -92,17 +100,9 @@ class RoutePlan:
         )
 
     def to_dict(self) -> dict[str, Any]:
-        def encode(segment: TransportSegment) -> dict[str, Any]:
-            data = asdict(segment)
-            data["mode"] = segment.mode.value
-            data["departure_at"] = segment.departure_at.isoformat()
-            data["arrival_at"] = segment.arrival_at.isoformat()
-            data["duration_minutes"] = segment.duration_minutes
-            return data
-
         return {
-            "outbound": [encode(item) for item in self.outbound],
-            "inbound": [encode(item) for item in self.inbound],
+            "outbound": [item.to_dict() for item in self.outbound],
+            "inbound": [item.to_dict() for item in self.inbound],
             "ticket_cost": self.ticket_cost,
             "accommodation_cost": self.accommodation_cost,
             "local_transfer_cost": self.local_transfer_cost,
@@ -112,4 +112,3 @@ class RoutePlan:
             "warnings": self.warnings,
             "score": self.score,
         }
-

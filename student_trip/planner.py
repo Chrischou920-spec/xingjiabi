@@ -6,6 +6,7 @@ from itertools import product
 from .domestic import validate_mainland_city
 from .models import JourneyRequest, Preference, RoutePlan, TransportSegment
 from .providers import TicketProvider
+from .query_control import check_cancelled
 
 
 class DomesticTripPlanner:
@@ -38,19 +39,27 @@ class DomesticTripPlanner:
             if not inward:
                 return []
 
-        plans = [self._evaluate(list(out), list(back), request) for out, back in product(outward, inward)]
+        plans = [
+            self._evaluate(list(out), list(back), request)
+            for out, back in product(outward, inward)
+            if not back or back[0].departure_at >= out[-1].arrival_at
+        ]
         plans = [plan for plan in plans if request.budget is None or plan.total_cost <= request.budget]
         self._score(plans, request.preference)
         return sorted(plans, key=lambda item: item.score)[:limit]
 
     def _search_routes(self, origin, destination, earliest, latest, request):
+        check_cancelled()
         routes = []
         for mode in request.allowed_modes:
             provider = self.providers.get(mode)
             if provider:
+                check_cancelled()
                 routes.extend([item] for item in provider.search(origin, destination, earliest, latest))
+                check_cancelled()
         if request.max_transfers >= 1:
             for hub in self.transfer_hubs:
+                check_cancelled()
                 if hub in (origin, destination):
                     continue
                 first_legs: list[TransportSegment] = []
