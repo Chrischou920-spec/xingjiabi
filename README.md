@@ -1,131 +1,115 @@
-# 行价比 · 本地出行规划网站
+# 行价比 · Xingjiabi
 
-当前版本：完整本地网站 · 更新日期：2026-10-04。第一版 `v0.1.0-demo` 的归档说明保留在 [历史版本记录](docs/RELEASE_v0.1.0-demo.md)。
+面向大学生的中文出行规划网站：比较中国大陆火车与航班的单程、往返方案，在预算和时间之间做选择。
 
-本仓库保存中文前端网站、国内行程规划后端、12306 / 国内航班 MCP 服务、票务 Provider、自动化测试、接口与调试文档和 UI 设计资料。网站由同一个 Python 服务在 `127.0.0.1:8765` 提供，无需单独启动前端服务。
+A local Chinese-language trip planner for students: compare one-way and round-trip train and flight options within mainland China, balancing cost and travel time.
 
-已验证真实 12306 查询，以及通过 Safari 已登录携程页面取得真实机票并显示在网站。国内航班 Provider 已接入，修复了浏览器并发冲突、验证异常空返回、超时重试重叠及前 10 条截断。Safari 模式目前读取已加载的航班列表，仍可能需要人工验证或重新登录；验收情况见 [航班调试记录](docs/FLIGHT_DEBUG.md)。直接运行后端时默认使用演示数据，使用本地网站启动脚本时默认查询真实来源。
+![行价比演示方案页 / Xingjiabi demo results](design/ui-audit/results-desktop-demo.jpg)
 
-项目的票务能力集中在 `services/`，应用层通过统一 Provider 接口调用火车和国内航班数据。
+*仓库已有的演示截图，使用固定数据，不代表实时票价。 / Existing demo screenshot using fixed data, not live fares.*
 
-已完成：
+## ✨ 功能 / Features
 
-- 仅允许中国大陆城市，国际线路在产品入口和规划器两层均被阻止。
-- 去程与返程联合组合，不再只推荐单程。
-- 火车和国内航班使用统一数据结构。
-- 按省钱、均衡、最快三种偏好排序。
-- 预算过滤、跨夜住宿成本、返校/门禁超时风险。
-- 无需网络的演示数据与自动化测试。
-- 一次中转与空铁组合计算框架；三段复杂路线不进入 MVP。
-- 可供网站调用的 `POST /plan` 本地 HTTP 接口，以及 `GET /cities` 城市选项接口。
-- 参考 `design/concepts/02-planning-ice-dashboard.png` 实现的中文搜索页和方案页。
-- 不包含国际节点、三段跨洲查询和开发者启动面板。
+- **往返联合比较**：把去程与返程组合成完整方案，展示总价、交通耗时和各段时间线。 / **Round-trip comparison**: combine outbound and return trips, showing total cost, travel duration and leg timelines.
+- **偏好与预算**：提供省钱、均衡、最快三种排序，并按完整方案总成本筛选预算。 / **Preferences and budget**: rank options by cost, balance or speed, with budget filtering on the whole trip.
+- **出行约束**：选择火车或飞机、限定出发时间窗口，提示晚于返校门禁的风险，并可计入跨夜行程住宿成本。 / **Travel constraints**: choose transport modes and departure windows, flag late returns and optionally include lodging costs for overnight travel.
+- **MCP 票源接入**：通过统一 Provider 接入 12306 火车票与携程国内航班；部分来源失败时保留可用结果并显示来源错误。 / **MCP data sources**: query 12306 trains and Ctrip domestic flights through a shared Provider interface; preserve available results and report source errors when one source fails.
+- **查询反馈**：显示数据模式、来源和查询时间，支持取消当前查询；固定 demo 可离线体验。 / **Query feedback**: display data mode, sources and query time, support cancellation and offer an offline demo.
 
-公开仓库不包含本地虚拟环境、依赖目录、运行日志、登录 Cookie、浏览器会话、临时构建文件和路演交付稿。克隆后需要按下方说明安装依赖；真实机票查询需要在本机 Safari 登录携程，不能从仓库获取其他人的登录状态。网站目前用于本地运行，不是已部署的公网订票平台。
+## 🛠 技术栈 / Stack
 
-自动化验证：Python 62 项、前端 22 项测试通过。Safari 航班查询和 Chrome 网站展示已完成真实机票验收，记录见 [航班调试记录](docs/FLIGHT_DEBUG.md)。
+- **Python ≥ 3.11**：规划器与标准库 HTTP 服务，根项目无必需第三方依赖。 / Planner and standard-library HTTP server; no required third-party packages for the core demo.
+- **HTML · CSS · JavaScript**：原生前端，由同一个 Python 服务提供页面和 JSON 接口。 / Plain frontend, with pages and JSON endpoints served by the same Python process.
+- **MCP / stdio**：Node.js · TypeScript 的 12306 服务，Python · FastMCP 的航班服务；Safari 或 DrissionPage / Chromium 用于航班页面读取。 / A Node.js / TypeScript train service and Python / FastMCP flight service; Safari or DrissionPage / Chromium reads flight pages.
+- **unittest · Node test runner**：仓库提供 Python 回归测试与前端合约测试。 / The repository includes Python regression tests and frontend contract tests.
 
-## 运行
+## 🚀 快速开始 / Quick start
 
-### 本地网站与真实票务查询
+### 离线演示 / Offline demo
 
-先按下方说明安装并构建 12306 MCP、航班 MCP 所需依赖，然后在项目根目录运行：
+安装 Python 3.11 或更新版本，然后运行： / With Python 3.11 or newer installed:
 
 ```bash
-bash scripts/start-local.sh
+git clone https://github.com/Chrischou920-spec/xingjiabi.git
+cd xingjiabi
+STUDENT_TRIP_DATA_MODE=demo python3 -m student_trip.server
 ```
 
-浏览器打开 `http://127.0.0.1:8765`。此启动方式默认使用 `live_all`：网页经 `/plan` 请求本地后端，后端通过 stdio 调用 12306 和国内航班 MCP；无需另开前端端口。搜索时会按所选日期实时打开携程航班列表页，网页结果页单独列出本次抓取的航班，不只显示前三个规划方案。若航班源被携程 WhaleGuard 拦截，网页会明确显示错误；只要 12306 有可用方案，仍会展示已查到的真实火车结果，不会自动混入演示机票。
+打开 [http://127.0.0.1:8765](http://127.0.0.1:8765)。demo 不需要安装票务依赖、登录或访问网络；端口被占用时可加 `STUDENT_TRIP_PORT=8766`。
 
-若 8765 已被旧版服务占用，可用 `STUDENT_TRIP_PORT=8766 bash scripts/start-local.sh` 在另一端口启动，不会停止旧进程。
+Open [http://127.0.0.1:8765](http://127.0.0.1:8765). The demo needs no ticket-service dependencies, login or network access. Set `STUDENT_TRIP_PORT=8766` to use another port.
 
-macOS 启动脚本默认使用 `FLIGHT_BROWSER_ENGINE=safari`。先在 Safari 打开已登录的携程机票页面；查询程序会在同一窗口创建带 `#xingjiabi-live` 标记的专用标签页，读取页面已加载的直达航班文字和最低报价。每次查询会自动选中专用标签所在窗口的该标签，避免携程在未选中的后台标签延迟加载列表；不会把 Safari 应用强制置前。首次运行可能需要在 macOS 授权本地程序自动化访问 Safari。无需导出 Cookie，也无需启用“允许 Apple Events 执行 JavaScript”。该模式读取已加载的列表，尚不保证覆盖携程的全部滚动分页结果；查询时请保留专用标签页。未登录的空列表会报告登录问题；点选、拼图、滑块等验证优先于底层无航班提示和旧列表，需由用户手动完成，未完成时返回 `VERIFICATION_REQUIRED`。设置 `FLIGHT_BROWSER_ENGINE=chromium` 可使用原有独立浏览器。
+demo 会自动填入固定去返程日期；按下表确认路线、时间窗口和交通方式： / The demo fills in fixed outbound and return dates automatically; confirm the route, time windows and transport modes below:
 
-当前网站只提供直达路线搜索。概念图中的中转次数和最短换乘时间暂不做成可操作入口，因为当前本地服务没有配置实际中转枢纽。网站不提供订票或支付。
+| 条件 / Field | 值 / Value |
+| --- | --- |
+| 路线 / Route | 上海 → 北京 / Shanghai → Beijing |
+| 去程 / Outbound | 2026-10-01 · 06:00–12:00 |
+| 返程 / Return | 2026-10-03 · 16:00–22:30 |
+| 交通方式 / Modes | 火车与飞机 / Train and flight |
 
-需要稳定演示界面时可改用固定数据：
+也可直接查看 demo 的命令行输出： / You can also inspect the demo from the command line:
 
 ```bash
-STUDENT_TRIP_DATA_MODE=demo bash scripts/start-local.sh
+python3 -m student_trip.cli --budget 1300 --preference cheapest
 ```
 
-演示数据只覆盖 2026 年 10 月 1 日上海去北京、10 月 3 日北京返上海，页面会明确标记“演示数据 · 非实时票价”。
+### 真实票务 / Live data
 
-### 命令行与接口
+以下是 macOS / Linux 的本地命令。12306 依赖 Node.js / npm；当前锁文件中的依赖要求 Node.js ≥ 22.7.5。安装后可单独使用真实火车模式：
 
-```bash
-python -m student_trip.cli
-```
-
-或指定条件：
+These local commands target macOS / Linux. The 12306 service requires Node.js / npm; a dependency in the current lockfile requires Node.js ≥ 22.7.5. For live trains only:
 
 ```bash
-python -m student_trip.cli --origin 上海 --destination 北京 --budget 1300 --preference cheapest
-```
-
-启动本地接口：
-
-```bash
-python -m student_trip.server
-```
-
-接口地址为 `http://127.0.0.1:8765`，健康检查为 `GET /health`，城市列表为 `GET /cities`，规划接口为 `POST /plan`。直接运行 `python -m student_trip.server` 时默认使用演示数据；通过上述脚本运行时默认使用真实票务来源。`POST /plan` 返回方案、查询时间、数据模式及按交通方式区分的来源错误。
-
-### 使用真实 12306 数据
-
-首次安装并编译依赖：
-
-```bash
-cd services/12306-mcp
-npm install
-npm run build
-cd ../..
-```
-
-启动真实火车票模式：
-
-```bash
+npm ci --prefix services/12306-mcp
+npm run build --prefix services/12306-mcp
 STUDENT_TRIP_DATA_MODE=live_train python3 -m student_trip.server
 ```
 
-此模式只返回火车方案。若 12306 网络或服务不可用，`POST /plan` 返回 HTTP 503，不会伪装成“没有票”。
-
-### 使用真实国内航班数据
-
-航班服务使用独立 Python 虚拟环境和 Chromium：
+同时查询火车与航班，先安装航班服务依赖，再启动： / To query both trains and flights, install the flight-service dependencies first:
 
 ```bash
-python3.12 -m venv .venv
-.venv/bin/pip install -r services/FlightTicketMCP/requirements.txt
-.venv/bin/pip install playwright
-.venv/bin/playwright install chromium
-FLIGHT_MCP_PYTHON="$PWD/.venv/bin/python" \
-STUDENT_TRIP_DATA_MODE=live_flight \
-python3 -m student_trip.server
+python3 -m venv .venv
+.venv/bin/python -m pip install -r services/FlightTicketMCP/requirements.txt
+bash scripts/start-local.sh
 ```
 
-火车和国内航班同时启用：
+`start-local.sh` 默认 `live_all`，要求已有 `.venv` 和 12306 构建产物；macOS 默认 Safari。请先在 Safari 登录携程，并按需完成系统自动化授权、登录和验证码。保留程序创建的 `#xingjiabi-live` 查询标签页；Safari 只读取已加载的直达航班，不能保证覆盖全部分页。
+
+`start-local.sh` defaults to `live_all` and requires `.venv` plus the built 12306 service. On macOS it defaults to Safari. Log in to Ctrip in Safari and complete any macOS automation permission, login or verification prompts. Keep the `#xingjiabi-live` query tab open; Safari reads loaded direct flights and does not guarantee full pagination coverage.
+
+其他平台或需要独立浏览器时，设置 `FLIGHT_BROWSER_ENGINE=chromium`，并安装 Chrome / Chromium；可用 `FLIGHT_BROWSER_PATH` 指定浏览器可执行文件。运行时使用 DrissionPage，Playwright 不是必需依赖；若需要用 Playwright 下载 Chromium，可额外执行：
+
+For other platforms or a separate browser, set `FLIGHT_BROWSER_ENGINE=chromium` and install Chrome / Chromium; use `FLIGHT_BROWSER_PATH` to specify its executable. Flight queries use DrissionPage, so Playwright is optional. To download Chromium with Playwright:
 
 ```bash
-FLIGHT_MCP_PYTHON="$PWD/.venv/bin/python" \
-STUDENT_TRIP_DATA_MODE=live_all \
-python3 -m student_trip.server
+.venv/bin/python -m pip install playwright
+.venv/bin/python -m playwright install chromium
+FLIGHT_BROWSER_ENGINE=chromium bash scripts/start-local.sh
 ```
 
-当前航班 Provider 只接受中国大陆城市，并只把直达航班作为单个行程段。本地查询默认使用可见浏览器；检测到验证码或登录弹窗时，在当前携程窗口等待人工处理（最多 120 秒），请不要关闭该窗口。未完成验证、页面未加载或解析失败时，接口返回 HTTP 503 和可诊断错误，不会把这些异常当成“没有航班”。火车和航班同时查询时，有可用火车方案则返回部分结果并标明航班失败。可通过 `FLIGHT_BROWSER_PATH` 指定本机 Chrome/Chromium 可执行文件；无桌面环境部署时可设置 `FLIGHT_BROWSER_VISIBLE=0`，但验证码仍需要可见窗口人工处理。
+若下载的 Chromium 没有被发现，先将 `FLIGHT_BROWSER_PATH` 设为该浏览器的实际可执行文件路径；当前 Provider 的 Playwright 缓存查找仅覆盖 macOS ARM 路径。 / If the downloaded Chromium is not found, set `FLIGHT_BROWSER_PATH` to its actual executable; the Provider's Playwright-cache lookup currently covers macOS ARM paths only.
 
-网站取消按钮通过 `POST /cancel` 向后端发送本次 `query_id`，停止后续规划并向航班 MCP 发送取消信号。浏览器会在当前短操作结束后释放资源，不会中断其他查询。单次航班搜索总预算为 240 秒，MCP 等待上限为 300 秒；超时不会立即重发仍在运行的任务。
+真实查询受源站、网络、浏览器页面及人工验证影响，请使用当次有效的出行日期；不会自动混入 demo 票。航班依赖以 `requirements.txt` 为准，航班子项目 `pyproject.toml` 未声明 DrissionPage。
 
-## UI 规范与验收
+Live queries depend on the upstream sites, network, browser pages and manual verification. Use valid travel dates; demo tickets are never silently substituted. Install flight dependencies from `requirements.txt`; the flight subproject's `pyproject.toml` does not declare DrissionPage.
 
-前端仍为原生 HTML / CSS / JavaScript，无新增框架或外部 UI 依赖。界面按中文出行工作台组织，包含联动行程摘要、门禁/住宿渐进展开、票券式方案比较、航班列表展开、来源诊断、字段错误定位、查询等待与取消反馈。
+## 数据边界 / Scope
 
-设计规范见 [design-system/xingjiabi/MASTER.md](design-system/xingjiabi/MASTER.md)，八项自检与验收记录见 [docs/UI_REFINEMENT.md](docs/UI_REFINEMENT.md)。前端合约测试运行 `node --test tests/test_web_ui.cjs`。
+- 本地运行、中国大陆城市、直达路线；不提供订票或支付。 / Local use, mainland Chinese cities and direct routes; no booking or payment.
+- 内核有一次中转和空铁组合计算能力，但网站未配置中转枢纽，当前 UI 不提供中转搜索。 / The core can calculate one-transfer and mixed-mode routes, but the website has no configured transfer hubs or transfer-search UI.
+- 时间窗口筛选出发时间；交通耗时不包含目的地停留时间；住宿成本仅用于单段行程跨日，不包含目的地整个停留期间的酒店预算。 / Time windows filter departures; travel duration excludes time spent at the destination; lodging costs cover overnight travel legs, not the whole destination stay.
+- 固定 demo 用于复现界面和算法，不代表当天可购买的票。历史真实查询记录也不保证今天的来源可用。 / The fixed demo reproduces the UI and algorithm, not tickets available today. Historical live-query records do not guarantee current availability.
 
-## 下一阶段
+## 代码与文档 / Code and docs
 
-`TicketProvider` 是真实数据接入边界。`TrainMcpProvider` 和 `DomesticFlightMcpProvider` 都已实现；火车数据已通过真实 12306 查询验证，航班 MCP 协议、浏览器启动和反爬错误边界也已验证。网站只调用 `GET /health`、`GET /cities` 和 `POST /plan`，无需直接处理 MCP 协议或浏览器验证码。
+[规划算法 / Planner](student_trip/planner.py) · [HTTP 与来源错误处理 / HTTP and source errors](student_trip/server.py) · [票务服务 / Ticket services](services/README.md) · [航班调试记录 / Flight debugging notes](docs/FLIGHT_DEBUG.md) · [UI 规范 / UI guidelines](design-system/xingjiabi/MASTER.md)
 
-下一阶段可根据比赛环境决定是否接入第二个国内航班数据源或增加带时效标记的缓存降级。
+运行已有回归与前端合约测试： / Run the existing regression and frontend contract tests:
 
-UI 字段见 [docs/UI_INPUTS.md](docs/UI_INPUTS.md)。
+```bash
+python3 -m unittest discover -s tests -v
+node --test tests/test_web_ui.cjs
+```
+
+测试命令用于本地检查，不代表真实票务来源已验收。 / These checks do not validate the current availability of live ticket sources.
